@@ -62,7 +62,7 @@ outputs:
     test:
       commands:
         - exit 0
-
+  # TODO: Extract parquet. Clean up build/host/run requirements
   - name: libarrow
     script: build-arrow.sh   # [unix]
     script: build-arrow.bat  # [win]
@@ -125,8 +125,6 @@ outputs:
         - libutf8proc
         - lz4-c
         - nlohmann_json
-        # gandiva depends on openssl
-        - openssl
         - orc
         - rapidjson
         - re2
@@ -152,8 +150,7 @@ outputs:
     test:
       commands:
         {% set headers = [
-            "arrow/api.h", "arrow/acero/api.h", "arrow/flight/types.h",
-            "arrow/flight/sql/api.h", "gandiva/engine.h", "parquet/api/reader.h"
+            "arrow/api.h", "parquet/api/reader.h"
         ] %}
         {% for each_header in headers %}
         # headers
@@ -162,8 +159,133 @@ outputs:
         {% endfor %}
 
         {% set libs = (cuda_compiler_version != "None") * ["arrow_cuda"] + [
-            "arrow", "arrow_acero", "arrow_dataset", "arrow_flight",
-            "arrow_flight_sql", "arrow_substrait", "gandiva", "parquet"
+            "arrow", "parquet"
+        ] %}
+        {% for each_lib in libs %}
+        # shared
+        - test -f $PREFIX/lib/lib{{ each_lib }}.so                 # [linux]
+        - test -f $PREFIX/lib/lib{{ each_lib }}.dylib              # [osx]
+        - if not exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if not exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+
+        # absence of static libraries
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.a                # [unix]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}_static.lib exit 1  # [win]
+        {% endfor %}
+
+        {% set libs = ["arrow_acero", "arrow_dataset", "arrow_flight",
+                       "arrow_flight_sql", "arrow_substrait", "gandiva"] %}
+        {% for each_lib in libs %}
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.so                 # [linux]
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.dylib              # [osx]
+        - if exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+        {% endfor %}
+
+    about:
+      home: http://github.com/apache/arrow
+      license: Apache-2.0
+      license_file:
+        - LICENSE.txt
+      summary: C++ libraries for Apache Arrow core
+
+  - name: libarrow-gandiva
+    script: build-arrow.sh   # [unix]
+    script: build-arrow.bat  # [win]
+    version: {{ version }}
+    build:
+      string: h{{ PKG_HASH }}_{{ PKG_BUILDNUM }}_{{ build_ext }}
+      run_exports:
+        - {{ pin_subpackage("libarrow-gandiva", max_pin="x") }}
+      ignore_run_exports_from:
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # arrow only uses headers, apparently
+        - gflags
+        # shared lib linked on unix, not on win
+        - glog                                   # [win]
+      ignore_run_exports:
+        # we don't need all of brotli's run-exports
+        - libbrotlicommon
+      track_features: {{ "[arrow-cuda]" if cuda_enabled else "" }}
+      missing_dso_whitelist:
+        - '*/libcuda.so.*'    # [linux]
+        - '*/nvcuda.dll'      # [win]
+    requirements:
+      build:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ compiler("c") }}
+        - {{ compiler("cxx") }}
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # needed for gandiva
+        - clangdev {{ llvm_version }}            # [build_platform != target_platform]
+        - llvmdev {{ llvm_version }}             # [build_platform != target_platform]
+        - gnuconfig                              # [build_platform != target_platform]
+        - cmake
+        - ninja
+        # necessary for vendored jemalloc
+        - autoconf     # [linux]
+        - make         # [linux]
+      host:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+        # for required dependencies, see
+        # https://github.com/apache/arrow/blob/apache-arrow-11.0.0/cpp/cmake_modules/ThirdpartyToolchain.cmake#L46-L75
+        - clangdev {{ llvm_version }}
+        - llvmdev {{ llvm_version }}
+        - aws-crt-cpp
+        - aws-sdk-cpp
+        - boost-cpp >=1.70
+        - brotli
+        - bzip2
+        # not yet: https://github.com/conda-forge/cpp-opentelemetry-sdk-feedstock/issues/38
+        # - cpp-opentelemetry-sdk
+        # - proto-opentelemetry-proto =={{ cpp_opentelemetry_sdk }}
+        - gflags
+        - glog
+        - google-cloud-cpp
+        # arrow uses a customized jemalloc, see #944
+        # - jemalloc
+        - libabseil
+        - libgrpc
+        - libprotobuf
+        - libutf8proc
+        - lz4-c
+        - nlohmann_json
+        - orc
+        - rapidjson
+        - re2
+        - snappy
+        - thrift-cpp
+        - ucx          # [linux]
+        - xsimd
+        - zlib
+        - zstd
+        - __cuda >={{ cuda_compiler_version_min }}  # [cuda_compiler_version != "None"]
+        # since libgoogle-cloud is static on windows, see
+        # https://github.com/conda-forge/google-cloud-cpp-feedstock/pull/108,
+        # its host deps (which aren't yet covered above) leak into the build here
+        - libcrc32c  # [win]
+        - libcurl    # [win]
+      run:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+      run_constrained:
+        - apache-arrow-proc =*={{ build_ext }}
+        # make sure we don't co-install with old version of old package name
+        - arrow-cpp ={{ version }}
+        # old parquet lib output, now part of this feedstock
+        - parquet-cpp <0.0a0
+
+    test:
+      commands:
+        {% set headers = [
+            "gandiva/engine.h"
+        ] %}
+        {% for each_header in headers %}
+        # headers
+        - test -f $PREFIX/include/{{ each_header }} || (echo "{{ each_header }} not found" && exit 1)  # [unix]
+        - if not exist %LIBRARY_INC%\{{ "\\".join(each_header.split("/")) }} exit 1                    # [win]
+        {% endfor %}
+        {% set libs = (cuda_compiler_version != "None") * ["arrow_cuda"] + [
+            "arrow", "gandiva"
         ] %}
         {% for each_lib in libs %}
         # shared
@@ -183,33 +305,689 @@ outputs:
         - if exist %LIBRARY_BIN%\arrow_cuda.dll exit 1             # [(cuda_compiler_version == "None") and win]
         - if exist %LIBRARY_LIB%\arrow_cuda.lib exit 1             # [(cuda_compiler_version == "None") and win]
         - if exist %LIBRARY_LIB%\arrow_cuda_static.lib exit 1      # [(cuda_compiler_version == "None") and win]
-
-        # gdb-wrapper (paths are stacked intentionally)
-        - test -f $PREFIX/share/gdb/auto-load/$PREFIX/lib/libarrow.so.{{ so_version }}-gdb.py     # [linux]
-        - test -f $PREFIX/share/gdb/auto-load/$PREFIX/lib/libarrow.{{ so_version }}.dylib-gdb.py  # [osx]
+        # absence of libs (is arrow present?)
+        {% set libs = ["arrow_acero", "arrow_dataset", "arrow_flight", "arrow_flight_sql", "arrow_substrait"] %}
+        {% for each_lib in libs %}
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.so                 # [linux]
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.dylib              # [osx]
+        - if exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+        {% endfor %}
 
     about:
       home: http://github.com/apache/arrow
       license: Apache-2.0
       license_file:
         - LICENSE.txt
-      summary: C++ libraries for Apache Arrow
+      summary: C++ libraries for Apache Arrow Gandiva
 
-  # compat output for old naming scheme; switched for 10.0.0; keep for a few versions
-  - name: arrow-cpp
+  - name: libarrow-acero
+    script: build-arrow.sh   # [unix]
+    script: build-arrow.bat  # [win]
     version: {{ version }}
     build:
       string: h{{ PKG_HASH }}_{{ PKG_BUILDNUM }}_{{ build_ext }}
       run_exports:
-        - {{ pin_subpackage("libarrow", max_pin="x.x.x") }}
+        - {{ pin_subpackage("libarrow-acero", max_pin="x") }}
+      ignore_run_exports_from:
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # arrow only uses headers, apparently
+        - gflags
+        # shared lib linked on unix, not on win
+        - glog                                   # [win]
+      ignore_run_exports:
+        # we don't need all of brotli's run-exports
+        - libbrotlicommon
+      track_features: {{ "[arrow-cuda]" if cuda_enabled else "" }}
+      missing_dso_whitelist:
+        - '*/libcuda.so.*'    # [linux]
+        - '*/nvcuda.dll'      # [win]
     requirements:
+      build:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ compiler("c") }}
+        - {{ compiler("cxx") }}
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # needed for gandiva
+        - clangdev {{ llvm_version }}            # [build_platform != target_platform]
+        - llvmdev {{ llvm_version }}             # [build_platform != target_platform]
+        - gnuconfig                              # [build_platform != target_platform]
+        - cmake
+        - ninja
+        # necessary for vendored jemalloc
+        - autoconf     # [linux]
+        - make         # [linux]
       host:
         - {{ pin_subpackage('libarrow', exact=True) }}
+        # for required dependencies, see
+        # https://github.com/apache/arrow/blob/apache-arrow-11.0.0/cpp/cmake_modules/ThirdpartyToolchain.cmake#L46-L75
+        - clangdev {{ llvm_version }}
+        - llvmdev {{ llvm_version }}
+        - aws-crt-cpp
+        - aws-sdk-cpp
+        - boost-cpp >=1.70
+        - brotli
+        - bzip2
+        # not yet: https://github.com/conda-forge/cpp-opentelemetry-sdk-feedstock/issues/38
+        # - cpp-opentelemetry-sdk
+        # - proto-opentelemetry-proto =={{ cpp_opentelemetry_sdk }}
+        - gflags
+        - glog
+        - google-cloud-cpp
+        # arrow uses a customized jemalloc, see #944
+        # - jemalloc
+        - libabseil
+        - libgrpc
+        - libprotobuf
+        - libutf8proc
+        - lz4-c
+        - nlohmann_json
+        - orc
+        - rapidjson
+        - re2
+        - snappy
+        - thrift-cpp
+        - ucx          # [linux]
+        - xsimd
+        - zlib
+        - zstd
+        - __cuda >={{ cuda_compiler_version_min }}  # [cuda_compiler_version != "None"]
+        # since libgoogle-cloud is static on windows, see
+        # https://github.com/conda-forge/google-cloud-cpp-feedstock/pull/108,
+        # its host deps (which aren't yet covered above) leak into the build here
+        - libcrc32c  # [win]
+        - libcurl    # [win]
       run:
         - {{ pin_subpackage('libarrow', exact=True) }}
+      run_constrained:
+        - apache-arrow-proc =*={{ build_ext }}
+        # make sure we don't co-install with old version of old package name
+        - arrow-cpp ={{ version }}
+        # old parquet lib output, now part of this feedstock
+        - parquet-cpp <0.0a0
+
     test:
       commands:
-        - exit 0
+        {% set headers = [
+            "arrow/acero/api.h"
+        ] %}
+        {% for each_header in headers %}
+        # headers
+        - test -f $PREFIX/include/{{ each_header }} || (echo "{{ each_header }} not found" && exit 1)  # [unix]
+        - if not exist %LIBRARY_INC%\{{ "\\".join(each_header.split("/")) }} exit 1                    # [win]
+        {% endfor %}
+        {% set libs = (cuda_compiler_version != "None") * ["arrow_cuda"] + [
+            "arrow", "arrow_acero"
+        ] %}
+        {% for each_lib in libs %}
+        # shared
+        - test -f $PREFIX/lib/lib{{ each_lib }}.so                 # [linux]
+        - test -f $PREFIX/lib/lib{{ each_lib }}.dylib              # [osx]
+        - if not exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if not exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+
+        # absence of static libraries
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.a                # [unix]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}_static.lib exit 1  # [win]
+        {% endfor %}
+
+        # absence of arrow_cuda for CPU builds
+        - test ! -f $PREFIX/lib/libarrow_cuda.so                   # [(cuda_compiler_version == "None") and linux]
+        - test ! -f $PREFIX/lib/libarrow_cuda.a                    # [(cuda_compiler_version == "None") and linux]
+        - if exist %LIBRARY_BIN%\arrow_cuda.dll exit 1             # [(cuda_compiler_version == "None") and win]
+        - if exist %LIBRARY_LIB%\arrow_cuda.lib exit 1             # [(cuda_compiler_version == "None") and win]
+        - if exist %LIBRARY_LIB%\arrow_cuda_static.lib exit 1      # [(cuda_compiler_version == "None") and win]
+        # absence of libs (is arrow present?)
+        {% set libs = ["arrow_dataset", "arrow_flight", "arrow_flight_sql", "arrow_substrait", "gandiva"] %}
+        {% for each_lib in libs %}
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.so                 # [linux]
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.dylib              # [osx]
+        - if exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+        {% endfor %}
+
+    about:
+      home: http://github.com/apache/arrow
+      license: Apache-2.0
+      license_file:
+        - LICENSE.txt
+      summary: C++ libraries for Apache Arrow Acero
+
+
+  - name: libarrow-dataset
+    script: build-arrow.sh   # [unix]
+    script: build-arrow.bat  # [win]
+    version: {{ version }}
+    build:
+      string: h{{ PKG_HASH }}_{{ PKG_BUILDNUM }}_{{ build_ext }}
+      run_exports:
+        - {{ pin_subpackage("libarrow-dataset", max_pin="x") }}
+      ignore_run_exports_from:
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # arrow only uses headers, apparently
+        - gflags
+        # shared lib linked on unix, not on win
+        - glog                                   # [win]
+      ignore_run_exports:
+        # we don't need all of brotli's run-exports
+        - libbrotlicommon
+      track_features: {{ "[arrow-cuda]" if cuda_enabled else "" }}
+      missing_dso_whitelist:
+        - '*/libcuda.so.*'    # [linux]
+        - '*/nvcuda.dll'      # [win]
+    requirements:
+      build:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ pin_subpackage('libarrow-acero', exact=True) }}
+        - {{ compiler("c") }}
+        - {{ compiler("cxx") }}
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # needed for gandiva
+        - clangdev {{ llvm_version }}            # [build_platform != target_platform]
+        - llvmdev {{ llvm_version }}             # [build_platform != target_platform]
+        - gnuconfig                              # [build_platform != target_platform]
+        - cmake
+        - ninja
+        # necessary for vendored jemalloc
+        - autoconf     # [linux]
+        - make         # [linux]
+      host:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ pin_subpackage('libarrow-acero', exact=True) }}
+        # for required dependencies, see
+        # https://github.com/apache/arrow/blob/apache-arrow-11.0.0/cpp/cmake_modules/ThirdpartyToolchain.cmake#L46-L75
+        - clangdev {{ llvm_version }}
+        - llvmdev {{ llvm_version }}
+        - aws-crt-cpp
+        - aws-sdk-cpp
+        - boost-cpp >=1.70
+        - brotli
+        - bzip2
+        # not yet: https://github.com/conda-forge/cpp-opentelemetry-sdk-feedstock/issues/38
+        # - cpp-opentelemetry-sdk
+        # - proto-opentelemetry-proto =={{ cpp_opentelemetry_sdk }}
+        - gflags
+        - glog
+        - google-cloud-cpp
+        # arrow uses a customized jemalloc, see #944
+        # - jemalloc
+        - libabseil
+        - libgrpc
+        - libprotobuf
+        - libutf8proc
+        - lz4-c
+        - nlohmann_json
+        - orc
+        - rapidjson
+        - re2
+        - snappy
+        - thrift-cpp
+        - ucx          # [linux]
+        - xsimd
+        - zlib
+        - zstd
+        - __cuda >={{ cuda_compiler_version_min }}  # [cuda_compiler_version != "None"]
+        # since libgoogle-cloud is static on windows, see
+        # https://github.com/conda-forge/google-cloud-cpp-feedstock/pull/108,
+        # its host deps (which aren't yet covered above) leak into the build here
+        - libcrc32c  # [win]
+        - libcurl    # [win]
+      run:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ pin_subpackage('libarrow-acero', exact=True) }}
+      run_constrained:
+        - apache-arrow-proc =*={{ build_ext }}
+        # make sure we don't co-install with old version of old package name
+        - arrow-cpp ={{ version }}
+        # old parquet lib output, now part of this feedstock
+        - parquet-cpp <0.0a0
+
+    test:
+      commands:
+        {% set headers = [
+            "arrow/dataset/api.h"
+        ] %}
+        {% for each_header in headers %}
+        # headers
+        - test -f $PREFIX/include/{{ each_header }} || (echo "{{ each_header }} not found" && exit 1)  # [unix]
+        - if not exist %LIBRARY_INC%\{{ "\\".join(each_header.split("/")) }} exit 1                    # [win]
+        {% endfor %}
+        {% set libs = (cuda_compiler_version != "None") * ["arrow_cuda"] + [
+            "arrow", "arrow_acero", "arrow_dataset"
+        ] %}
+        {% for each_lib in libs %}
+        # shared
+        - test -f $PREFIX/lib/lib{{ each_lib }}.so                 # [linux]
+        - test -f $PREFIX/lib/lib{{ each_lib }}.dylib              # [osx]
+        - if not exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if not exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+
+        # absence of static libraries
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.a                # [unix]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}_static.lib exit 1  # [win]
+        {% endfor %}
+
+        # absence of arrow_cuda for CPU builds
+        - test ! -f $PREFIX/lib/libarrow_cuda.so                   # [(cuda_compiler_version == "None") and linux]
+        - test ! -f $PREFIX/lib/libarrow_cuda.a                    # [(cuda_compiler_version == "None") and linux]
+        - if exist %LIBRARY_BIN%\arrow_cuda.dll exit 1             # [(cuda_compiler_version == "None") and win]
+        - if exist %LIBRARY_LIB%\arrow_cuda.lib exit 1             # [(cuda_compiler_version == "None") and win]
+        - if exist %LIBRARY_LIB%\arrow_cuda_static.lib exit 1      # [(cuda_compiler_version == "None") and win]
+        # absence of libs (is arrow present?)
+        {% set libs = ["arrow_flight", "arrow_flight_sql", "arrow_substrait", "gandiva"] %}
+        {% for each_lib in libs %}
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.so                 # [linux]
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.dylib              # [osx]
+        - if exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+        {% endfor %}
+
+    about:
+      home: http://github.com/apache/arrow
+      license: Apache-2.0
+      license_file:
+        - LICENSE.txt
+      summary: C++ libraries for Apache Arrow Dataset
+
+  - name: libarrow-substrait
+    script: build-arrow.sh   # [unix]
+    script: build-arrow.bat  # [win]
+    version: {{ version }}
+    build:
+      string: h{{ PKG_HASH }}_{{ PKG_BUILDNUM }}_{{ build_ext }}
+      run_exports:
+        - {{ pin_subpackage("libarrow-substrait", max_pin="x") }}
+      ignore_run_exports_from:
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # arrow only uses headers, apparently
+        - gflags
+        # shared lib linked on unix, not on win
+        - glog                                   # [win]
+      ignore_run_exports:
+        # we don't need all of brotli's run-exports
+        - libbrotlicommon
+      track_features: {{ "[arrow-cuda]" if cuda_enabled else "" }}
+      missing_dso_whitelist:
+        - '*/libcuda.so.*'    # [linux]
+        - '*/nvcuda.dll'      # [win]
+    requirements:
+      build:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ pin_subpackage('libarrow-dataset', exact=True) }}
+        - {{ compiler("c") }}
+        - {{ compiler("cxx") }}
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # needed for gandiva
+        - clangdev {{ llvm_version }}            # [build_platform != target_platform]
+        - llvmdev {{ llvm_version }}             # [build_platform != target_platform]
+        - gnuconfig                              # [build_platform != target_platform]
+        - cmake
+        - ninja
+        # necessary for vendored jemalloc
+        - autoconf     # [linux]
+        - make         # [linux]
+      host:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ pin_subpackage('libarrow-dataset', exact=True) }}
+        # for required dependencies, see
+        # https://github.com/apache/arrow/blob/apache-arrow-11.0.0/cpp/cmake_modules/ThirdpartyToolchain.cmake#L46-L75
+        - clangdev {{ llvm_version }}
+        - llvmdev {{ llvm_version }}
+        - aws-crt-cpp
+        - aws-sdk-cpp
+        - boost-cpp >=1.70
+        - brotli
+        - bzip2
+        # not yet: https://github.com/conda-forge/cpp-opentelemetry-sdk-feedstock/issues/38
+        # - cpp-opentelemetry-sdk
+        # - proto-opentelemetry-proto =={{ cpp_opentelemetry_sdk }}
+        - gflags
+        - glog
+        - google-cloud-cpp
+        # arrow uses a customized jemalloc, see #944
+        # - jemalloc
+        - libabseil
+        - libgrpc
+        - libprotobuf
+        - libutf8proc
+        - lz4-c
+        - nlohmann_json
+        - orc
+        - rapidjson
+        - re2
+        - snappy
+        - thrift-cpp
+        - ucx          # [linux]
+        - xsimd
+        - zlib
+        - zstd
+        - __cuda >={{ cuda_compiler_version_min }}  # [cuda_compiler_version != "None"]
+        # since libgoogle-cloud is static on windows, see
+        # https://github.com/conda-forge/google-cloud-cpp-feedstock/pull/108,
+        # its host deps (which aren't yet covered above) leak into the build here
+        - libcrc32c  # [win]
+        - libcurl    # [win]
+      run:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ pin_subpackage('libarrow-dataset', exact=True) }}
+      run_constrained:
+        - apache-arrow-proc =*={{ build_ext }}
+        # make sure we don't co-install with old version of old package name
+        - arrow-cpp ={{ version }}
+        # old parquet lib output, now part of this feedstock
+        - parquet-cpp <0.0a0
+
+    test:
+      commands:
+        {% set headers = [
+            "arrow/engine/substrait/api.h"
+        ] %}
+        {% for each_header in headers %}
+        # headers
+        - test -f $PREFIX/include/{{ each_header }} || (echo "{{ each_header }} not found" && exit 1)  # [unix]
+        - if not exist %LIBRARY_INC%\{{ "\\".join(each_header.split("/")) }} exit 1                    # [win]
+        {% endfor %}
+        {% set libs = (cuda_compiler_version != "None") * ["arrow_cuda"] + [
+            "arrow", "arrow_acero", "arrow_dataset", "arrow_substrait"
+        ] %}
+        {% for each_lib in libs %}
+        # shared
+        - test -f $PREFIX/lib/lib{{ each_lib }}.so                 # [linux]
+        - test -f $PREFIX/lib/lib{{ each_lib }}.dylib              # [osx]
+        - if not exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if not exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+
+        # absence of static libraries
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.a                # [unix]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}_static.lib exit 1  # [win]
+        {% endfor %}
+
+        # absence of arrow_cuda for CPU builds
+        - test ! -f $PREFIX/lib/libarrow_cuda.so                   # [(cuda_compiler_version == "None") and linux]
+        - test ! -f $PREFIX/lib/libarrow_cuda.a                    # [(cuda_compiler_version == "None") and linux]
+        - if exist %LIBRARY_BIN%\arrow_cuda.dll exit 1             # [(cuda_compiler_version == "None") and win]
+        - if exist %LIBRARY_LIB%\arrow_cuda.lib exit 1             # [(cuda_compiler_version == "None") and win]
+        - if exist %LIBRARY_LIB%\arrow_cuda_static.lib exit 1      # [(cuda_compiler_version == "None") and win]
+        # absence of libs (is arrow present?)
+        {% set libs = ["arrow_flight", "arrow_flight_sql", "gandiva"] %}
+        {% for each_lib in libs %}
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.so                 # [linux]
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.dylib              # [osx]
+        - if exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+        {% endfor %}
+
+    about:
+      home: http://github.com/apache/arrow
+      license: Apache-2.0
+      license_file:
+        - LICENSE.txt
+      summary: C++ libraries for Apache Arrow Substrait
+
+  - name: libarrow-flight
+    script: build-arrow.sh   # [unix]
+    script: build-arrow.bat  # [win]
+    version: {{ version }}
+    build:
+      string: h{{ PKG_HASH }}_{{ PKG_BUILDNUM }}_{{ build_ext }}
+      run_exports:
+        - {{ pin_subpackage("libarrow-flight", max_pin="x") }}
+      ignore_run_exports_from:
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # arrow only uses headers, apparently
+        - gflags
+        # shared lib linked on unix, not on win
+        - glog                                   # [win]
+      ignore_run_exports:
+        # we don't need all of brotli's run-exports
+        - libbrotlicommon
+      track_features: {{ "[arrow-cuda]" if cuda_enabled else "" }}
+      missing_dso_whitelist:
+        - '*/libcuda.so.*'    # [linux]
+        - '*/nvcuda.dll'      # [win]
+    requirements:
+      build:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ compiler("c") }}
+        - {{ compiler("cxx") }}
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # needed for gandiva
+        - clangdev {{ llvm_version }}            # [build_platform != target_platform]
+        - llvmdev {{ llvm_version }}             # [build_platform != target_platform]
+        - gnuconfig                              # [build_platform != target_platform]
+        - cmake
+        - ninja
+        # necessary for vendored jemalloc
+        - autoconf     # [linux]
+        - make         # [linux]
+      host:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+        # for required dependencies, see
+        # https://github.com/apache/arrow/blob/apache-arrow-11.0.0/cpp/cmake_modules/ThirdpartyToolchain.cmake#L46-L75
+        - clangdev {{ llvm_version }}
+        - llvmdev {{ llvm_version }}
+        - aws-crt-cpp
+        - aws-sdk-cpp
+        - boost-cpp >=1.70
+        - brotli
+        - bzip2
+        # not yet: https://github.com/conda-forge/cpp-opentelemetry-sdk-feedstock/issues/38
+        # - cpp-opentelemetry-sdk
+        # - proto-opentelemetry-proto =={{ cpp_opentelemetry_sdk }}
+        - gflags
+        - glog
+        - google-cloud-cpp
+        # arrow uses a customized jemalloc, see #944
+        # - jemalloc
+        - libabseil
+        - libgrpc
+        - libprotobuf
+        - libutf8proc
+        - lz4-c
+        - nlohmann_json
+        - orc
+        - rapidjson
+        - re2
+        - snappy
+        - thrift-cpp
+        - ucx          # [linux]
+        - xsimd
+        - zlib
+        - zstd
+        - __cuda >={{ cuda_compiler_version_min }}  # [cuda_compiler_version != "None"]
+        # since libgoogle-cloud is static on windows, see
+        # https://github.com/conda-forge/google-cloud-cpp-feedstock/pull/108,
+        # its host deps (which aren't yet covered above) leak into the build here
+        - libcrc32c  # [win]
+        - libcurl    # [win]
+      run:
+        - {{ pin_subpackage('libarrow', exact=True) }}
+      run_constrained:
+        - apache-arrow-proc =*={{ build_ext }}
+        # make sure we don't co-install with old version of old package name
+        - arrow-cpp ={{ version }}
+        # old parquet lib output, now part of this feedstock
+        - parquet-cpp <0.0a0
+
+    test:
+      commands:
+        {% set headers = [
+            "arrow/flight/types.h"
+        ] %}
+        {% for each_header in headers %}
+        # headers
+        - test -f $PREFIX/include/{{ each_header }} || (echo "{{ each_header }} not found" && exit 1)  # [unix]
+        - if not exist %LIBRARY_INC%\{{ "\\".join(each_header.split("/")) }} exit 1                    # [win]
+        {% endfor %}
+        {% set libs = (cuda_compiler_version != "None") * ["arrow_cuda"] + [
+            "arrow", "arrow_flight", "arrow_flight_transport_ucx"
+        ] %}
+        {% for each_lib in libs %}
+        # shared
+        - test -f $PREFIX/lib/lib{{ each_lib }}.so                 # [linux]
+        - test -f $PREFIX/lib/lib{{ each_lib }}.dylib              # [osx]
+        - if not exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if not exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+
+        # absence of static libraries
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.a                # [unix]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}_static.lib exit 1  # [win]
+        {% endfor %}
+
+        # absence of arrow_cuda for CPU builds
+        - test ! -f $PREFIX/lib/libarrow_cuda.so                   # [(cuda_compiler_version == "None") and linux]
+        - test ! -f $PREFIX/lib/libarrow_cuda.a                    # [(cuda_compiler_version == "None") and linux]
+        - if exist %LIBRARY_BIN%\arrow_cuda.dll exit 1             # [(cuda_compiler_version == "None") and win]
+        - if exist %LIBRARY_LIB%\arrow_cuda.lib exit 1             # [(cuda_compiler_version == "None") and win]
+        - if exist %LIBRARY_LIB%\arrow_cuda_static.lib exit 1      # [(cuda_compiler_version == "None") and win]
+        # absence of libs (is arrow present?)
+        {% set libs = ["arrow_acero", "arrow_dataset", "arrow_flight_sql", "arrow_substrait", "gandiva"] %}
+        {% for each_lib in libs %}
+        - test ! -f lib/lib{{ each_lib }}.so                 # [linux]
+        - test ! -f lib/lib{{ each_lib }}.dylib              # [osx]
+        - if exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+        {% endfor %}
+
+    about:
+      home: http://github.com/apache/arrow
+      license: Apache-2.0
+      license_file:
+        - LICENSE.txt
+      summary: C++ libraries for Apache Arrow Flight
+
+  - name: libarrow-flight-sql
+    script: build-arrow.sh   # [unix]
+    script: build-arrow.bat  # [win]
+    version: {{ version }}
+    build:
+      string: h{{ PKG_HASH }}_{{ PKG_BUILDNUM }}_{{ build_ext }}
+      run_exports:
+        - {{ pin_subpackage("libarrow-flight-sql", max_pin="x") }}
+      ignore_run_exports_from:
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # arrow only uses headers, apparently
+        - gflags
+        # shared lib linked on unix, not on win
+        - glog                                   # [win]
+      ignore_run_exports:
+        # we don't need all of brotli's run-exports
+        - libbrotlicommon
+      track_features: {{ "[arrow-cuda]" if cuda_enabled else "" }}
+      missing_dso_whitelist:
+        - '*/libcuda.so.*'    # [linux]
+        - '*/nvcuda.dll'      # [win]
+    requirements:
+      build:
+        - {{ pin_subpackage('libarrow-flight', exact=True) }}
+        - {{ compiler("c") }}
+        - {{ compiler("cxx") }}
+        - {{ compiler("cuda") }}                 # [cuda_compiler_version != "None"]
+        # needed for gandiva
+        - clangdev {{ llvm_version }}            # [build_platform != target_platform]
+        - llvmdev {{ llvm_version }}             # [build_platform != target_platform]
+        - gnuconfig                              # [build_platform != target_platform]
+        - cmake
+        - ninja
+        # necessary for vendored jemalloc
+        - autoconf     # [linux]
+        - make         # [linux]
+      host:
+        - {{ pin_subpackage('libarrow-flight', exact=True) }}
+        # for required dependencies, see
+        # https://github.com/apache/arrow/blob/apache-arrow-11.0.0/cpp/cmake_modules/ThirdpartyToolchain.cmake#L46-L75
+        - clangdev {{ llvm_version }}
+        - llvmdev {{ llvm_version }}
+        - aws-crt-cpp
+        - aws-sdk-cpp
+        - boost-cpp >=1.70
+        - brotli
+        - bzip2
+        # not yet: https://github.com/conda-forge/cpp-opentelemetry-sdk-feedstock/issues/38
+        # - cpp-opentelemetry-sdk
+        # - proto-opentelemetry-proto =={{ cpp_opentelemetry_sdk }}
+        - gflags
+        - glog
+        - google-cloud-cpp
+        # arrow uses a customized jemalloc, see #944
+        # - jemalloc
+        - libabseil
+        - libgrpc
+        - libprotobuf
+        - libutf8proc
+        - lz4-c
+        - nlohmann_json
+        - orc
+        - rapidjson
+        - re2
+        - snappy
+        - thrift-cpp
+        - ucx          # [linux]
+        - xsimd
+        - zlib
+        - zstd
+        - __cuda >={{ cuda_compiler_version_min }}  # [cuda_compiler_version != "None"]
+        # since libgoogle-cloud is static on windows, see
+        # https://github.com/conda-forge/google-cloud-cpp-feedstock/pull/108,
+        # its host deps (which aren't yet covered above) leak into the build here
+        - libcrc32c  # [win]
+        - libcurl    # [win]
+      run:
+        - {{ pin_subpackage('libarrow-flight', exact=True) }}
+      run_constrained:
+        - apache-arrow-proc =*={{ build_ext }}
+        # make sure we don't co-install with old version of old package name
+        - arrow-cpp ={{ version }}
+        # old parquet lib output, now part of this feedstock
+        - parquet-cpp <0.0a0
+
+    test:
+      commands:
+        {% set headers = [
+            "arrow/flight/sql/api.h"
+        ] %}
+        {% for each_header in headers %}
+        # headers
+        - test -f $PREFIX/include/{{ each_header }} || (echo "{{ each_header }} not found" && exit 1)  # [unix]
+        - if not exist %LIBRARY_INC%\{{ "\\".join(each_header.split("/")) }} exit 1                    # [win]
+        {% endfor %}
+        {% set libs = (cuda_compiler_version != "None") * ["arrow_cuda"] + [
+            "arrow", "arrow_flight", "arrow_flight_transport_ucx",
+            "arrow_flight_sql"
+        ] %}
+        {% for each_lib in libs %}
+        # shared
+        - test -f $PREFIX/lib/lib{{ each_lib }}.so                 # [linux]
+        - test -f $PREFIX/lib/lib{{ each_lib }}.dylib              # [osx]
+        - if not exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if not exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+
+        # absence of static libraries
+        - test ! -f $PREFIX/lib/lib{{ each_lib }}.a                # [unix]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}_static.lib exit 1  # [win]
+        {% endfor %}
+
+        # absence of arrow_cuda for CPU builds
+        - test ! -f $PREFIX/lib/libarrow_cuda.so                   # [(cuda_compiler_version == "None") and linux]
+        - test ! -f $PREFIX/lib/libarrow_cuda.a                    # [(cuda_compiler_version == "None") and linux]
+        - if exist %LIBRARY_BIN%\arrow_cuda.dll exit 1             # [(cuda_compiler_version == "None") and win]
+        - if exist %LIBRARY_LIB%\arrow_cuda.lib exit 1             # [(cuda_compiler_version == "None") and win]
+        - if exist %LIBRARY_LIB%\arrow_cuda_static.lib exit 1      # [(cuda_compiler_version == "None") and win]
+        # absence of libs (is arrow present?)
+        {% set libs = ["arrow_acero", "arrow_dataset", "arrow_substrait", "gandiva"] %}
+        {% for each_lib in libs %}
+        - test ! -f lib/lib{{ each_lib }}.so                 # [linux]
+        - test ! -f lib/lib{{ each_lib }}.dylib              # [osx]
+        - if exist %LIBRARY_BIN%\{{ each_lib }}.dll exit 1     # [win]
+        - if exist %LIBRARY_LIB%\{{ each_lib }}.lib exit 1     # [win]
+        {% endfor %}
+
+    about:
+      home: http://github.com/apache/arrow
+      license: Apache-2.0
+      license_file:
+        - LICENSE.txt
+      summary: C++ libraries for Apache Arrow Flight SQL
 
   - name: pyarrow
     script: build-pyarrow.sh   # [unix]
@@ -240,7 +1018,10 @@ outputs:
         - cmake
         - ninja
       host:
-        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ pin_subpackage('libarrow-dataset', exact=True) }}
+        - {{ pin_subpackage('libarrow-flight', exact=True) }}
+        - {{ pin_subpackage('libarrow-gandiva', exact=True) }}
+        - {{ pin_subpackage('libarrow-substrait', exact=True) }}
         - clangdev {{ llvm_version }}
         - llvmdev {{ llvm_version }}
         - cython <3
@@ -249,7 +1030,10 @@ outputs:
         - setuptools
         - setuptools_scm
       run:
-        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ pin_subpackage('libarrow-dataset', exact=True) }}
+        - {{ pin_subpackage('libarrow-flight', exact=True) }}
+        - {{ pin_subpackage('libarrow-gandiva', exact=True) }}
+        - {{ pin_subpackage('libarrow-substrait', exact=True) }}
         - {{ pin_compatible('numpy') }}
         - python
       run_constrained:
@@ -299,6 +1083,8 @@ outputs:
         - LICENSE.txt
       summary: Python libraries for Apache Arrow
 
+
+
   - name: pyarrow-tests
     script: build-pyarrow.sh   # [unix]
     script: build-pyarrow.bat  # [win]
@@ -321,7 +1107,10 @@ outputs:
         - cmake
         - ninja
       host:
-        - {{ pin_subpackage('libarrow', exact=True) }}
+        - {{ pin_subpackage('libarrow-dataset', exact=True) }}
+        - {{ pin_subpackage('libarrow-flight', exact=True) }}
+        - {{ pin_subpackage('libarrow-gandiva', exact=True) }}
+        - {{ pin_subpackage('libarrow-substrait', exact=True) }}
         - {{ pin_subpackage('pyarrow', exact=True) }}
         - clangdev {{ llvm_version }}
         - llvmdev {{ llvm_version }}
@@ -336,25 +1125,27 @@ outputs:
       run_constrained:
         - apache-arrow-proc =*={{ build_ext }}
 
-    {% if not (aarch64 or ppc64le) or py in (310, 311) %}
-    # only run the full test suite for one python version when in emulation (each run takes ~45min);
-    # there's essentially zero divergence in behaviour across python versions anyway, and otherwise
-    # CUDA builds for aarch/ppc consistently run out of disk space on azure for some reason
+    {% if not (aarch64 or ppc64le) or py == 311 %}
+    # only run the full test suite for one python version when in emulation
+    # (each run can take up to ~45min); there's essentially zero divergence
+    # in behaviour across python versions anyway
     test:
       requires:
         # test_cpp_extension_in_python requires a compiler
         - {{ compiler("cxx") }}  # [linux]
-        # temporary pin due to missing fixture
-        - pytest <7.4.0
+        - pytest
         - pytest-lazy-fixture
         - backports.zoneinfo     # [py<39]
+        - boto3
         - cffi
         - cloudpickle
         - cython <3
         - fastparquet
         - fsspec
         - hypothesis
+        - minio-server
         - pandas
+        - s3fs
         - scipy
         # these are generally (far) behind on migrating abseil/grpc/protobuf,
         # and using them as test dependencies blocks the migrator unnecessarily
@@ -369,8 +1160,8 @@ outputs:
       source_files:
         - testing/data
       commands:
-        - cd ${SP_DIR}/pyarrow/tests                        # [unix]
-        - cd %SP_DIR%\pyarrow\tests                         # [win]
+        - cd ${SP_DIR}                                      # [unix]
+        - cd %SP_DIR%                                       # [win]
         - export ARROW_TEST_DATA="${SRC_DIR}/testing/data"  # [unix]
         - set "ARROW_TEST_DATA=%SRC_DIR%\testing\data"      # [win]
 
@@ -380,24 +1171,24 @@ outputs:
         # skip tests that raise SIGINT and crash the test suite
         {% set tests_to_skip = tests_to_skip + " or (test_csv and test_cancellation)" %}  # [linux]
         {% set tests_to_skip = tests_to_skip + " or (test_flight and test_interrupt)" %}  # [linux]
-        # cannot pass -D_LIBCPP_DISABLE_AVAILABILITY to test suite for our older macos sdk
-        {% set tests_to_skip = tests_to_skip + " or test_cpp_extension_in_python" %}      # [osx]
         # skip tests that make invalid(-for-conda) assumptions about the compilers setup
         {% set tests_to_skip = tests_to_skip + " or test_cython_api" %}                   # [unix]
         {% set tests_to_skip = tests_to_skip + " or test_visit_strings" %}                # [unix]
         # skip tests that cannot succeed in emulation
         {% set tests_to_skip = tests_to_skip + " or test_debug_memory_pool_disabled" %}   # [aarch64 or ppc64le]
         {% set tests_to_skip = tests_to_skip + " or test_env_var_io_thread_count" %}      # [aarch64 or ppc64le]
+        # XMinioInvalidObjectName on win: "Object name contains unsupported characters"
+        {% set tests_to_skip = tests_to_skip + " or test_write_to_dataset_with_partitions_s3fs" %}  # [win]
         # vvvvvvv TESTS THAT SHOULDN'T HAVE TO BE SKIPPED vvvvvvv
-        # segfaults on OSX: to investigate ASAP
-        {% set tests_to_skip = tests_to_skip + " or test_flight" %}                       # [osx]
+        # new fsspec changed behaviour, see https://github.com/apache/arrow/issues/37555
+        {% set tests_to_skip = tests_to_skip + " or test_get_file_info_with_selector" %}
         # gandiva tests are segfaulting on ppc
         {% set tests_to_skip = tests_to_skip + " or test_gandiva" %}                      # [ppc64le]
         # test failures on ppc (both failing with: Float value was truncated converting to int32)
         {% set tests_to_skip = tests_to_skip + " or test_safe_cast_from_float_with_nans_to_int" %}  # [ppc64le]
         {% set tests_to_skip = tests_to_skip + " or test_float_with_null_as_integer" %}             # [ppc64le]
         # ^^^^^^^ TESTS THAT SHOULDN'T HAVE TO BE SKIPPED ^^^^^^^
-        - pytest -rfEs -k "not ({{ tests_to_skip }})"
+        - pytest pyarrow/ -rfEs -k "not ({{ tests_to_skip }})"
     {% endif %}
 
     about:
