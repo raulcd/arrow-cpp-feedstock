@@ -80,8 +80,9 @@ if "%cuda_compiler_version%"=="None" (
     set ARROW_TEST_DATA=%SRC_DIR%\testing\data
     set PARQUET_TEST_DATA=%SRC_DIR%\cpp\submodules\parquet-testing\data
     @rem This test uses RequesterPays bucket, thus is not available from some CI hosts
-    set "GTEST_FILTER=-S3RegionResolutionTest.RestrictedBucket:TestFlight.ConnectUri"
+    set "GTEST_FILTER=TestFlight.ConnectUri"
     ctest -R arrow-flight-test -VV --timeout 300
+    echo ##### RUN 2 RETURNED #####
     tasklist /FI "IMAGENAME eq flight-test-server.exe"
     @rem ctest --progress --output-on-failure || exit 1
 )
